@@ -83,6 +83,20 @@ const processGainersData = (data) => {
     .slice(0, CONFIG.TOP_COUNT);
 };
 
+// Endpoint de bienvenida (para la raíz)
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Binance Top Gainers API",
+    version: "1.0.0",
+    endpoints: {
+      topGainers: "/api/top-gainers",
+      health: "/api/health"
+    },
+    documentation: "API para obtener las criptomonedas con mayor ganancia en Binance"
+  });
+});
+
 // Endpoint principal
 app.get("/api/top-gainers", async (req, res) => {
   try {
@@ -175,39 +189,6 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Endpoint para configuración (solo en desarrollo)
-app.get("/api/config", (req, res) => {
-  if (process.env.NODE_ENV !== 'development') {
-    return res.status(404).json({ error: "Not found" });
-  }
-  
-  res.json({
-    success: true,
-    config: {
-      MIN_VOLUME: CONFIG.MIN_VOLUME,
-      MIN_GAIN_PERCENT: CONFIG.MIN_GAIN_PERCENT,
-      TOP_COUNT: CONFIG.TOP_COUNT,
-      CACHE_DURATION: CONFIG.CACHE_DURATION,
-      REQUEST_TIMEOUT: CONFIG.REQUEST_TIMEOUT
-    }
-  });
-});
-
-// Endpoint para limpiar cache (útil para desarrollo)
-app.post("/api/clear-cache", (req, res) => {
-  if (process.env.NODE_ENV !== 'development') {
-    return res.status(404).json({ error: "Not found" });
-  }
-  
-  cache = null;
-  lastFetch = 0;
-  
-  res.json({
-    success: true,
-    message: "Cache cleared successfully"
-  });
-});
-
 // Manejo de rutas no encontradas
 app.use("*", (req, res) => {
   res.status(404).json({
@@ -226,23 +207,6 @@ app.use((error, req, res, next) => {
   res.status(500).json({
     success: false,
     error: "Internal server error"
-  });
-});
-
-// Manejo de señales para shutdown graceful
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
   });
 });
 
