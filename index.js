@@ -3,14 +3,43 @@ const axios = require('axios');
 const cors = require('cors');
 const NodeCache = require('node-cache');
 
+// 🎯 CONFIGURACIÓN PARA RAILWAY
 const app = express();
-const cache = new NodeCache({ stdTTL: 30 }); // Cache por 30 segundos
+const cache = new NodeCache({ 
+    stdTTL: 30, // Cache por 30 segundos
+    checkperiod: 60, // Verificar cada minuto
+    useClones: false, // Mejor rendimiento
+    maxKeys: 100 // Límite de keys en cache
+});
 
 app.use(cors());
 app.use(express.json());
 
+// 🚨 MANEJO GLOBAL DE ERRORES
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    // No salir del proceso en producción
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    // No salir del proceso en producción
+});
+
+// Middleware de manejo de errores
+app.use((err, req, res, next) => {
+    console.error('Error middleware:', err);
+    res.status(500).json({ 
+        error: 'Error interno del servidor',
+        message: process.env.NODE_ENV === 'development' ? err.message : 'Error interno'
+    });
+});
+
 // 🔥 CONFIGURACIÓN DEL SISTEMA
 const CONFIG = {
+    BINANCE_API_KEY: process.env.BINANCE_API_KEY || 'Sr3uBcWgM8ZZS2Uu3liN1nEodwiwN4RVfAbjmpKYnUs9VE6sl8eeHoh4ZNYNpvs2',
+    BINANCE_SECRET: process.env.BINANCE_SECRET || '', // No necesario para endpoints públicos
+    BINANCE_BASE_URL: 'https://api.binance.com',
     EXPLOSION_MIN_VOLUME: 1000000, // Volumen mínimo en USDT
     EXPLOSION_MIN_GAIN: 8, // Ganancia mínima 8%
     MIN_PRICE: 0.000001, // Precio mínimo para evitar shitcoins
@@ -20,7 +49,7 @@ const CONFIG = {
     RSI_OVERBOUGHT: 70
 };
 
-// 🧮 CALCULADORA DE INDICADORES TÉCNICOS
+// 🧮 CALCULADORA DE INDICADORES TÉCNICOS MEJORADA
 class TechnicalAnalysis {
     static calculateRSI(prices, period = 14) {
         if (prices.length < period) return 50;
@@ -60,6 +89,47 @@ class TechnicalAnalysis {
     static detectVolumeSpike(currentVolume, avgVolume) {
         if (!avgVolume || avgVolume === 0) return 1;
         return currentVolume / avgVolume;
+    }
+
+    // 🔥 NUEVO: Análisis técnico con datos históricos
+    static async analyzeTechnicals(symbol) {
+        try {
+            const historicalData = await getHistoricalData(symbol);
+            if (historicalData.length === 0) return null;
+
+            const prices = historicalData.map(candle => candle.close);
+            const volumes = historicalData.map(candle => candle.volume);
+            
+            const rsi = this.calculateRSI(prices);
+            const volatility = this.calculateVolatility(prices);
+            const avgVolume = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+            const currentVolume = volumes[volumes.length - 1];
+            const volumeSpike = this.detectVolumeSpike(currentVolume, avgVolume);
+
+            return {
+                rsi: rsi.toFixed(2),
+                volatility: volatility.toFixed(2),
+                volumeSpike: volumeSpike.toFixed(2),
+                trend: this.getTrend(prices),
+                support: Math.min(...prices.slice(-5)).toFixed(8),
+                resistance: Math.max(...prices.slice(-5)).toFixed(8)
+            };
+        } catch (error) {
+            console.error(`Error en análisis técnico para ${symbol}:`, error.message);
+            return null;
+        }
+    }
+
+    static getTrend(prices) {
+        const recent = prices.slice(-5);
+        const older = prices.slice(-10, -5);
+        
+        const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+        const olderAvg = older.reduce((a, b) => a + b, 0) / older.length;
+        
+        if (recentAvg > olderAvg * 1.02) return 'BULLISH';
+        if (recentAvg < olderAvg * 0.98) return 'BEARISH';
+        return 'NEUTRAL';
     }
 }
 
@@ -166,10 +236,20 @@ class ExplosionDetector {
     }
 }
 
-// 🌐 OBTENER DATOS DE BINANCE
+// 🌐 OBTENER DATOS DE BINANCE CON API KEY
 async function getBinanceData() {
     try {
-        const response = await axios.get('https://api.binance.com/api/v3/ticker/24hr');
+        const headers = {
+            'X-MBX-APIKEY': CONFIG.BINANCE_API_KEY,
+            'User-Agent': 'Mozilla/5.0 (compatible; BoostIQ/1.0)'
+        };
+
+        // Obtener datos de 24hr con API key para mayor límite
+        const response = await axios.get(`${CONFIG.BINANCE_BASE_URL}/api/v3/ticker/24hr`, {
+            headers,
+            timeout: 10000
+        });
+
         return response.data.filter(token => 
             token.symbol.endsWith('USDT') && 
             parseFloat(token.quoteVolume) > CONFIG.EXPLOSION_MIN_VOLUME &&
@@ -177,7 +257,51 @@ async function getBinanceData() {
             parseFloat(token.lastPrice) < CONFIG.MAX_PRICE
         );
     } catch (error) {
-        console.error('Error obteniendo datos de Binance:', error);
+        console.error('Error obteniendo datos de Binance:', error.message);
+        
+        // Fallback sin API key si falla
+        try {
+            const fallbackResponse = await axios.get('https://api.binance.com/api/v3/ticker/24hr', {
+                timeout: 5000
+            });
+            return fallbackResponse.data.filter(token => 
+                token.symbol.endsWith('USDT') && 
+                parseFloat(token.quoteVolume) > CONFIG.EXPLOSION_MIN_VOLUME
+            );
+        } catch (fallbackError) {
+            console.error('Fallback también falló:', fallbackError.message);
+            return [];
+        }
+    }
+}
+
+// 🔥 OBTENER DATOS HISTÓRICOS CON API KEY
+async function getHistoricalData(symbol, interval = '1h', limit = 24) {
+    try {
+        const headers = {
+            'X-MBX-APIKEY': CONFIG.BINANCE_API_KEY
+        };
+
+        const response = await axios.get(`${CONFIG.BINANCE_BASE_URL}/api/v3/klines`, {
+            headers,
+            params: {
+                symbol,
+                interval,
+                limit
+            },
+            timeout: 5000
+        });
+
+        return response.data.map(candle => ({
+            timestamp: candle[0],
+            open: parseFloat(candle[1]),
+            high: parseFloat(candle[2]),
+            low: parseFloat(candle[3]),
+            close: parseFloat(candle[4]),
+            volume: parseFloat(candle[5])
+        }));
+    } catch (error) {
+        console.error(`Error obteniendo datos históricos para ${symbol}:`, error.message);
         return [];
     }
 }
@@ -393,10 +517,12 @@ app.get('/api/smart-analysis', async (req, res) => {
 
 // ⚡ ENDPOINT: HEALTH CHECK
 app.get('/api/health', (req, res) => {
-    res.json({
+    res.status(200).json({
         status: 'OK',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        env: process.env.NODE_ENV || 'development',
         endpoints: [
             '/api/explosion-candidates',
             '/api/top-gainers',
@@ -407,40 +533,26 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// 🏠 ENDPOINT: ROOT
+// Health check adicional para Railway
+app.get('/health', (req, res) => res.status(200).send('OK'));
 app.get('/', (req, res) => {
-    res.json({
+    res.status(200).json({
         message: '🚀 BoostIQ Crypto API - Sistema de Detección de Explosiones',
-        version: '2.0.0',
-        author: 'BoostIQ Team',
-        endpoints: {
-            explosionCandidates: '/api/explosion-candidates',
-            topGainers: '/api/top-gainers',
-            newListings: '/api/new-listings',
-            smartAnalysis: '/api/smart-analysis',
-            health: '/api/health'
-        },
-        features: [
-            '🔥 Detección inteligente de explosiones',
-            '📊 Análisis técnico automático',
-            '🎯 Recomendaciones de compra/venta',
-            '⚡ Datos en tiempo real',
-            '🧠 Scoring inteligente',
-            '📈 Múltiples estrategias'
-        ]
+        status: 'Running',
+        version: '2.0.0'
     });
 });
 
 // 🚀 INICIAR SERVIDOR
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 BoostIQ Crypto API corriendo en puerto ${PORT}`);
     console.log(`📈 Endpoints disponibles:`);
-    console.log(`   - Explosion Candidates: http://localhost:${PORT}/api/explosion-candidates`);
-    console.log(`   - Top Gainers: http://localhost:${PORT}/api/top-gainers`);
-    console.log(`   - New Listings: http://localhost:${PORT}/api/new-listings`);
-    console.log(`   - Smart Analysis: http://localhost:${PORT}/api/smart-analysis`);
-    console.log(`   - Health: http://localhost:${PORT}/api/health`);
+    console.log(`   - Explosion Candidates: /api/explosion-candidates`);
+    console.log(`   - Top Gainers: /api/top-gainers`);
+    console.log(`   - New Listings: /api/new-listings`);
+    console.log(`   - Smart Analysis: /api/smart-analysis`);
+    console.log(`   - Health: /api/health`);
 });
 
 module.exports = app;
